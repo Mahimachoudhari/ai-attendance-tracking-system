@@ -5,7 +5,7 @@
 -- ============================================================
 
 -- Extensions
-CREATE EXTENSION IF NOT EXISTS vector;
+--CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS pg_trgm;       -- fast name search
 
@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS employees (
     company_id      INT          NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
     department      VARCHAR(100),
     role            VARCHAR(100),
-    face_embedding  VECTOR(128),          -- ArcFace 128-d, L2-normalised
+    face_embedding TEXT,          -- ArcFace 128-d, L2-normalised
     face_image_path TEXT,
     shift_start     TIME         NOT NULL DEFAULT '09:00',
     shift_end       TIME         NOT NULL DEFAULT '18:00',
@@ -47,9 +47,9 @@ CREATE TABLE IF NOT EXISTS employees (
 );
 
 -- pgvector index for fast cosine similarity search
-CREATE INDEX IF NOT EXISTS idx_emp_embedding
-    ON employees USING ivfflat (face_embedding vector_cosine_ops)
-    WITH (lists = 10);
+--CREATE INDEX IF NOT EXISTS idx_emp_embedding
+    --ON employees USING ivfflat (face_embedding vector_cosine_ops)
+    --WITH (lists = 10);
 
 CREATE INDEX IF NOT EXISTS idx_emp_company_active
     ON employees (company_id, is_active);

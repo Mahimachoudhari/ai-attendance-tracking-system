@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Attendance System — Live Dashboard</title>
+
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Sora:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="/static/css/main.css">
+</head>
+<body>
+
+<!-- ════════════════════════════════════════
+     HEADER
+════════════════════════════════════════ -->
+<header>
+  <div class="logo">
+    <div class="logo-icon">🤖</div>
+    <div>
+      <div class="logo-name">AI Attendance System</div>
+      <div class="logo-sub">ACME Industries · Face Recognition · 600+ Employees</div>
+    </div>
+  </div>
+
+  <div class="header-right">
+    <div class="ws-status">
+      <div class="ws-dot" id="ws-dot"></div>
+      <span id="ws-label">Connecting…</span>
+    </div>
+    <div class="live-badge">
+      <div class="pulse-dot"></div>
+      LIVE
+    </div>
+    <div id="clock">--:--:--</div>
+  </div>
+</header>
+
+<!-- Processing scanbar (shown while AI pipeline is running) -->
+<div id="proc-bar"></div>
+
+<!-- ════════════════════════════════════════
+     MAIN GRID
+════════════════════════════════════════ -->
+<div class="layout">
+
+  <!-- ── Camera 1: Entry Gate ── -->
+  <div class="card">
+    <div class="card-head">
+      Entry Gate — Camera 1
+      <div class="badge">
+        <div class="dot dot-g"></div>
+        <span id="c1-fps">-- fps</span>
+        &nbsp;·&nbsp;
+        <span id="c1-faces">0 faces</span>
+        &nbsp;·&nbsp;
+        <span id="c1-ms">-- ms</span>
+      </div>
+    </div>
+    <div class="cam-wrap" id="cam1-wrap">
+      <div class="cam-inner"></div>
+      <!-- No-signal placeholder -->
+      <div class="no-signal" id="cam1-ns">
+        <div class="ns-icon">📷</div>
+        <div>Awaiting Entry Gate feed…</div>
+        <div class="ns-hint">python demo/run_demo.py</div>
+      </div>
+      <!-- Live annotated frame -->
+      <img id="cam1-img" src="" alt="Entry Gate Feed" style="display:none">
+      <!-- Bottom pills -->
+      <div class="cam-pills">
+        <div class="cam-pill" style="color:var(--accent2)">● ENTRY</div>
+        <div class="cam-pill" id="c1-time">--:--:--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Camera 2: Exit Gate ── -->
+  <div class="card">
+    <div class="card-head">
+      Exit Gate — Camera 2
+      <div class="badge">
+        <div class="dot dot-c"></div>
+        <span id="c2-fps">-- fps</span>
+        &nbsp;·&nbsp;
+        <span id="c2-faces">0 faces</span>
+        &nbsp;·&nbsp;
+        <span id="c2-ms">-- ms</span>
+      </div>
+    </div>
+    <div class="cam-wrap" id="cam2-wrap">
+      <div class="cam-inner"></div>
+      <div class="no-signal" id="cam2-ns">
+        <div class="ns-icon">📷</div>
+        <div>Awaiting Exit Gate feed…</div>
+        <div class="ns-hint">python demo/run_demo.py</div>
+      </div>
+      <img id="cam2-img" src="" alt="Exit Gate Feed" style="display:none">
+      <div class="cam-pills">
+        <div class="cam-pill" style="color:var(--accent)">● EXIT</div>
+        <div class="cam-pill" id="c2-time">--:--:--</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Live Event Timeline (right panel, spans 2 rows) ── -->
+  <div class="card timeline-card">
+    <div class="card-head">
+      Live Event Feed
+      <div class="badge">
+        <span id="evt-count">0</span>&nbsp;events today
+      </div>
+    </div>
+    <div class="timeline-body" id="timeline"></div>
+  </div>
+
+  <!-- ── Stats Row ── -->
+  <div class="stats-row">
+
+    <div class="stat s-entry">
+      <div class="stat-label">Entered</div>
+      <div class="stat-val" id="s-entered">0</div>
+      <div class="stat-sub">employees</div>
+    </div>
+
+    <div class="stat s-exit">
+      <div class="stat-label">Exited</div>
+      <div class="stat-val" id="s-exited">0</div>
+      <div class="stat-sub">employees</div>
+    </div>
+
+    <div class="stat s-onsite">
+      <div class="stat-label">On Premises</div>
+      <div class="stat-val" id="s-onsite">0</div>
+      <div class="stat-sub">currently inside</div>
+    </div>
+
+    <div class="stat s-late">
+      <div class="stat-label">Late Arrivals</div>
+      <div class="stat-val" id="s-late">0</div>
+      <div class="stat-sub">today</div>
+    </div>
+
+    <div class="stat s-hours">
+      <div class="stat-label">Avg Work Time</div>
+      <div class="stat-val" id="s-hours">-- h</div>
+      <div class="stat-sub">today</div>
+    </div>
+
+    <div class="stat s-alerts">
+      <div class="stat-label">Security Alerts</div>
+      <div class="stat-val" id="s-alerts">0</div>
+      <div class="stat-sub">unresolved</div>
+    </div>
+
+  </div>
+
+  <!-- ── Today's Attendance Table ── -->
+  <div class="card table-card">
+    <div class="card-head">
+      Today's Attendance
+      <div class="badge" id="tbl-updated">--</div>
+    </div>
+    <div class="search-row">
+      <span style="color:var(--muted);font-size:14px">🔍</span>
+      <input
+        class="search-input"
+        id="search"
+        type="text"
+        placeholder="Search by name, code or department…"
+        autocomplete="off"
+        spellcheck="false"
+      >
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Employee</th>
+            <th>Code</th>
+            <th>Department</th>
+            <th>Entry</th>
+            <th>Exit</th>
+            <th>Duration</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="tbl-body"></tbody>
+      </table>
+    </div>
+  </div>
+
+</div><!-- /.layout -->
+
+<!-- ════════════════════════════════════════
+     TOAST CONTAINER
+════════════════════════════════════════ -->
+<div id="toasts" aria-live="polite"></div>
+
+<!-- ════════════════════════════════════════
+     SCRIPTS  (order matters)
+════════════════════════════════════════ -->
+<script src="/static/js/clock.js"></script>
+<script src="/static/js/stats.js"></script>
+<script src="/static/js/toast.js"></script>
+<script src="/static/js/timeline.js"></script>
+<script src="/static/js/table.js"></script>
+<script src="/static/js/alerts.js"></script>
+<script src="/static/js/camera.js"></script>
+<script src="/static/js/websocket.js"></script>
+<script src="/static/js/demo.js"></script>
+<script src="/static/js/dashboard.js"></script><!-- MUST be last -->
+
+</body>
+</html>
