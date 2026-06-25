@@ -1,90 +1,91 @@
+bash
+
+cat > /home/claude/attendance-system/frontend/static/js/demo.js << 'EOF'
 /**
  * demo.js
  * -------
- * Demo / fallback mode.
+ * COMPLETELY DISABLED — Koi fake/synthetic events fire nahi honge.
  *
- * When the backend is available but no camera is streaming frames,
- * this module fires synthetic attendance events at random intervals
- * so the dashboard looks live during a presentation.
+ * Real attendance sirf tab hogi jab:
+ *   1. Backend chal raha ho  (uvicorn backend.main:app)
+ *   2. Camera feed connected ho  (python demo/run_demo.py ya real RTSP camera)
+ *   3. Employees enrolled hon  (python database/seed_employees.py)
  *
- * It fires a burst of 4 events on load, then one every 3.5–8 s.
- *
- * To DISABLE demo mode, remove the <script> tag for this file
- * from dashboard.html, or set:
- *   window.DEMO_MODE = false;
- * before the scripts load.
+ * Ye file sirf ek warning banner dikhati hai agar camera connected nahi hai.
  */
 
 'use strict';
 
 const Demo = {
 
-  NAMES: [
-    'Aarav Sharma',    'Priya Patel',    'Rohan Mehta',
-    'Ananya Singh',    'Vikram Joshi',   'Neha Gupta',
-    'Arjun Verma',     'Pooja Nair',     'Karan Malhotra',
-    'Divya Rao',       'Siddharth Kumar','Kavya Reddy',
-    'Aditya Iyer',     'Shreya Pillai',  'Rahul Das',
-    'Ishaan Chopra',   'Meera Menon',    'Varun Bhatt',
-    'Riya Kapoor',     'Akash Tiwari',
-  ],
+  _bannerShown:   false,
+  _realFrameSeen: false,
+  _checkTimer:    null,
 
-  DEPTS: ['Engineering','HR','Operations','Finance','Logistics','Security'],
-
-  _idx:   0,
-  _timer: null,
+  // Kitne seconds baad check kare ki camera connected hai ya nahi
+  CAMERA_CHECK_DELAY_MS: 8000,
 
   init() {
-    // Respect opt-out
-    if (window.DEMO_MODE === false) return;
+    // Real camera frame aate hi banner hatao
+    window.addEventListener('camera_frame', () => {
+      this._realFrameSeen = true;
+      this._hideBanner();
+      clearTimeout(this._checkTimer);
+    }, { once: false });
 
-    // Burst: 4 events, 350 ms apart
-    for (let i = 0; i < 4; i++) {
-      setTimeout(() => this._fire(), 800 + i * 350);
-    }
-
-    // Trickle: random interval
-    this._schedule();
+    // 8 seconds baad check karo — agar camera connected nahi to sirf warning banner dikhao
+    // KOI FAKE DATA FIRE NAHI HOGA
+    this._checkTimer = setTimeout(() => {
+      if (!this._realFrameSeen) {
+        this._showNoCameraBanner();
+      }
+    }, this.CAMERA_CHECK_DELAY_MS);
   },
 
-  _schedule() {
-    const delay = 3500 + Math.random() * 4500;
-    this._timer = setTimeout(() => {
-      this._fire();
-      this._schedule();
-    }, delay);
+  // ── Banner: no camera warning ──────────────────────────────────
+  _showNoCameraBanner() {
+    if (this._bannerShown) return;
+    this._bannerShown = true;
+
+    const el = document.createElement('div');
+    el.id = 'no-camera-banner';
+    el.innerHTML = `
+      <span style="font-size:16px">📷</span>
+      <span>Camera feed connected nahi hai &mdash; Real attendance ke liye camera chalao</span>
+      <span style="opacity:0.6;font-size:10px;display:block;margin-top:4px">
+        Terminal mein run karo: &nbsp;<code style="background:rgba(0,0,0,0.3);padding:2px 6px;border-radius:4px">python demo/run_demo.py</code>
+        &nbsp; ya real RTSP camera connect karo
+      </span>
+    `;
+    el.style.cssText = `
+      position:    fixed;
+      bottom:      20px;
+      left:        50%;
+      transform:   translateX(-50%);
+      background:  rgba(255, 184, 0, 0.1);
+      border:      1px solid rgba(255, 184, 0, 0.45);
+      color:       #ffb800;
+      font-family: 'JetBrains Mono', monospace;
+      font-size:   12px;
+      padding:     12px 24px;
+      border-radius: 10px;
+      z-index:     9999;
+      text-align:  center;
+      max-width:   520px;
+      line-height: 1.6;
+      box-shadow:  0 4px 24px rgba(0,0,0,0.4);
+    `;
+    document.body.appendChild(el);
   },
 
-  _fire() {
-    const name = this.NAMES[this._idx % this.NAMES.length];
-    this._idx++;
-
-    // Every 4th event is an exit; every 15th is a security alert
-    let gate = 'entry';
-    if (this._idx % 15 === 0) gate = 'alert';
-    else if (this._idx % 4 === 0) gate = 'exit';
-
-    const payload = {
-      type:          'attendance_event',
-      gate,
-      employee_name: gate === 'alert' ? '⚠ Unknown Person' : name,
-      employee_code: `ACME${String(this._idx).padStart(4, '0')}`,
-      confidence:    parseFloat((0.88 + Math.random() * 0.11).toFixed(3)),
-      timestamp:     new Date().toISOString(),
-      proc_ms:       Math.floor(1700 + Math.random() * 700),
-      department:    this.DEPTS[this._idx % this.DEPTS.length],
-    };
-
-    if (gate === 'alert') {
-      window.dispatchEvent(new CustomEvent('security_alert', { detail: {
-        type:       'security_alert',
-        alert:      'unknown_person',
-        camera_id:  (this._idx % 2) + 1,
-        confidence: payload.confidence,
-        timestamp:  payload.timestamp,
-      }}));
-    } else {
-      window.dispatchEvent(new CustomEvent('attendance_event', { detail: payload }));
-    }
+  _hideBanner() {
+    const el = document.getElementById('no-camera-banner');
+    if (el) el.remove();
+    this._bannerShown = false;
   },
 };
+/**EOF
+echo "demo.js fixed - no fake data"
+Output
+
+demo.js fixed - no fake data*/

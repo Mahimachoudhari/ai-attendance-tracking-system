@@ -1,25 +1,26 @@
+
 """
 backend/core/ai_pipeline.py
 ----------------------------
-End-to-end face recognition pipeline:
+PRODUCTION AI pipeline — NO mock data, NO fake events.
 
-  Step 1  Face Detection      – RetinaFace (via InsightFace)
-  Step 2  Quality Filter      – size / blur / yaw
-  Step 3  Image Enhancement   – CLAHE + gamma for low-light gates
-  Step 4  Embedding Extraction– ArcFace 128-d (GPU via ONNX)
-  Step 5  Anti-Spoof Check    – passive texture-based liveness
-  Step 6  Employee Matching   – cosine similarity against cache
-  Step 7  Result Assembly     – RecognitionResult dataclass
+Agar InsightFace load na ho to pipeline empty list return karta hai.
+Koi bhi fake face ya random embedding generate NAHI hoga.
 
-The InsightFace app is loaded once (singleton) at first call.
-Falls back to a deterministic mock when InsightFace is unavailable (CI/demo).
+Steps:
+  1. Face Detection      – RetinaFace (InsightFace)
+  2. Quality Filter      – size / blur / yaw
+  3. Image Enhancement   – CLAHE + gamma (low-light cameras)
+  4. Anti-Spoof Check    – passive liveness
+  5. Employee Matching   – cosine similarity
+  6. Annotate Frame      – bounding boxes draw
 """
 
 from __future__ import annotations
 
 import time
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
 import cv2
@@ -28,13 +29,14 @@ from loguru import logger
 
 from backend.config import cfg
 
-# ── Singleton model lock ────────────────────────────────────────────────────────
-_model_lock = threading.Lock()
-_app = None          # InsightFace FaceAnalysis
+# ── Model singleton ────────────────────────────────────────────
+_model_lock  = threading.Lock()
+_app         = None          # InsightFace FaceAnalysis app
+_model_ready = False         # True only when real model loaded
 
 
 def _load_model():
-    global _app
+    global _app, _model_ready
     if _app is not None:
         return _app
     with _model_lock:
@@ -47,24 +49,37 @@ def _load_model():
                 if cfg.gpu_id >= 0
                 else ["CPUExecutionProvider"]
             )
-            app = FaceAnalysis(name=cfg.model_name, providers=providers)
+            app = FaceAnalysis(name='buffalo_l', providers=providers)
             app.prepare(ctx_id=cfg.gpu_id, det_size=(640, 640))
-            _app = app
-            logger.info(f"InsightFace loaded: {cfg.model_name} (GPU id={cfg.gpu_id})")
+            _app         = app
+            _model_ready = True
+            logger.info(f"✅ InsightFace loaded: {cfg.model_name} (GPU={cfg.gpu_id})")
         except Exception as e:
-            logger.warning(f"InsightFace unavailable ({e}) — mock pipeline active")
-            _app = "mock"
+            # Model load nahi hua — _app = None rakhenge
+            # Koi mock/fake data NAHI banayenge
+            _app         = None
+            _model_ready = False
+            logger.error(
+                f"❌ InsightFace load failed: {e}\n"
+                f"   Real attendance kaam nahi karega jab tak model load na ho.\n"
+                f"   Fix: pip install insightface onnxruntime"
+            )
     return _app
 
 
-# ── Dataclasses ─────────────────────────────────────────────────────────────────
+def is_model_ready() -> bool:
+    """Returns True only when real AI model is loaded."""
+    return _model_ready
+
+
+# ── Dataclasses ────────────────────────────────────────────────
 
 @dataclass
 class DetectedFace:
-    bbox:           tuple[int, int, int, int]     # x1, y1, x2, y2
-    landmarks:      Optional[np.ndarray]           # 5×2 keypoints
-    det_confidence: float                          # RetinaFace score
-    embedding:      Optional[np.ndarray] = None   # ArcFace 128-d
+    bbox:           tuple[int, int, int, int]
+    landmarks:      Optional[np.ndarray]
+    det_confidence: float
+    embedding:      Optional[np.ndarray] = None
     track_id:       Optional[int]        = None
     quality_ok:     bool                 = True
     reject_reason:  str                  = ""
@@ -83,16 +98,26 @@ class RecognitionResult:
     proc_ms:       float = 0.0
 
 
-# ── Step 1: Detection ───────────────────────────────────────────────────────────
+# ── Step 1: Face Detection ─────────────────────────────────────
 
 def detect_faces(frame: np.ndarray) -> list[DetectedFace]:
-    """Run RetinaFace on a BGR frame. Returns one DetectedFace per person."""
+    """
+    Real face detection using RetinaFace.
+    Agar model load nahi hua → empty list return karta hai.
+    KOI FAKE FACE NAHI BANEGA.
+    """
     app = _load_model()
 
-    if app == "mock":
-        return _mock_detect(frame)
+    # Model available nahi → koi face nahi detect hoga
+    if app is None:
+        return []
 
-    raw_faces = app.get(frame)
+    try:
+        raw_faces = app.get(frame)
+    except Exception as e:
+        logger.error(f"Face detection error: {e}")
+        return []
+
     results: list[DetectedFace] = []
     for f in raw_faces:
         x1, y1, x2, y2 = (int(v) for v in f.bbox)
@@ -100,56 +125,32 @@ def detect_faces(frame: np.ndarray) -> list[DetectedFace]:
             bbox=(x1, y1, x2, y2),
             landmarks=getattr(f, "kps", None),
             det_confidence=float(f.det_score),
-            embedding=getattr(f, "embedding", None),   # ArcFace emb direct
+            embedding=getattr(f, "embedding", None),
         ))
     return results
 
 
-def _mock_detect(frame: np.ndarray) -> list[DetectedFace]:
-    """Deterministic mock for demo / unit testing (no model required)."""
-    rng  = np.random.default_rng(seed=int(time.time()) % 1000)
-    h, w = frame.shape[:2]
-    n    = rng.integers(1, 5)
-    out: list[DetectedFace] = []
-    for _ in range(n):
-        x1 = int(rng.integers(0, max(w // 2, 1)))
-        y1 = int(rng.integers(0, max(h // 2, 1)))
-        x2 = min(x1 + 130, w)
-        y2 = min(y1 + 160, h)
-        emb = rng.standard_normal(128).astype(np.float32)
-        emb /= np.linalg.norm(emb) + 1e-8
-        out.append(DetectedFace(
-            bbox=(x1, y1, x2, y2),
-            landmarks=None,
-            det_confidence=round(0.85 + rng.random() * 0.13, 4),
-            embedding=emb,
-        ))
-    return out
-
-
-# ── Step 2: Quality Filter ──────────────────────────────────────────────────────
+# ── Step 2: Quality Filter ─────────────────────────────────────
 
 def filter_quality(face: DetectedFace, frame: np.ndarray) -> DetectedFace:
-    """
-    Reject faces that are:
-    - Too small (below cfg.min_face_size px)
-    - Too blurry (Laplacian variance < cfg.blur_threshold)
-    - Extreme yaw angle (> cfg.max_yaw_degrees, estimated from landmarks)
-    """
+    """Reject faces that are too small, blurry, or extreme-angle."""
     x1, y1, x2, y2 = face.bbox
     w, h = x2 - x1, y2 - y1
 
+    # Size check
     if w < cfg.min_face_size or h < cfg.min_face_size:
         face.quality_ok    = False
         face.reject_reason = f"too_small ({w}×{h}px)"
         return face
 
+    # Crop validity
     crop = frame[max(y1, 0):y2, max(x1, 0):x2]
     if crop.size == 0:
         face.quality_ok    = False
         face.reject_reason = "empty_crop"
         return face
 
+    # Blur check
     gray       = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
     blur_score = cv2.Laplacian(gray, cv2.CV_64F).var()
     if blur_score < cfg.blur_threshold:
@@ -157,11 +158,11 @@ def filter_quality(face: DetectedFace, frame: np.ndarray) -> DetectedFace:
         face.reject_reason = f"blurry (score={blur_score:.1f})"
         return face
 
-    # Yaw from eye landmarks
+    # Yaw angle from eye landmarks
     if face.landmarks is not None and len(face.landmarks) >= 2:
         eye_l, eye_r = face.landmarks[0], face.landmarks[1]
-        eye_dist = abs(float(eye_r[0]) - float(eye_l[0]))
-        yaw_est  = (1.0 - eye_dist / max(float(w), 1.0)) * 90.0
+        eye_dist     = abs(float(eye_r[0]) - float(eye_l[0]))
+        yaw_est      = (1.0 - eye_dist / max(float(w), 1.0)) * 90.0
         if yaw_est > cfg.max_yaw_degrees:
             face.quality_ok    = False
             face.reject_reason = f"extreme_yaw ({yaw_est:.0f}°)"
@@ -171,63 +172,53 @@ def filter_quality(face: DetectedFace, frame: np.ndarray) -> DetectedFace:
     return face
 
 
-# ── Step 3: Image Enhancement ───────────────────────────────────────────────────
+# ── Step 3: Image Enhancement ──────────────────────────────────
 
 def enhance_low_light(crop: np.ndarray) -> np.ndarray:
-    """
-    CLAHE on L-channel + gamma correction.
-    Significantly improves ArcFace accuracy for dark gate cameras.
-    """
+    """CLAHE on L-channel + gamma correction for dark gate cameras."""
     if crop.size == 0:
         return crop
-    lab        = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
-    l, a, b    = cv2.split(lab)
-    clahe      = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    l_eq       = clahe.apply(l)
-    enhanced   = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
-    # Gamma correction γ = 1.4
-    lut = np.array(
+    lab      = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+    l, a, b  = cv2.split(lab)
+    clahe    = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    l_eq     = clahe.apply(l)
+    enhanced = cv2.cvtColor(cv2.merge((l_eq, a, b)), cv2.COLOR_LAB2BGR)
+    lut      = np.array(
         [min(255, int(((i / 255.0) ** (1.0 / 1.4)) * 255)) for i in range(256)],
         dtype=np.uint8,
     )
     return cv2.LUT(enhanced, lut)
 
 
-# ── Step 4: Anti-Spoofing ───────────────────────────────────────────────────────
+# ── Step 4: Anti-Spoofing ──────────────────────────────────────
 
 def check_liveness(crop: np.ndarray) -> tuple[bool, float]:
     """
-    Passive liveness: analyse high-frequency texture using Laplacian.
-    Printed photos / screens have distinctive texture profiles.
-    Returns (is_spoof: bool, spoof_score: float 0-1).
-
-    In production, replace with a dedicated anti-spoof model
-    (e.g. Silent-Face-Anti-Spoofing).
+    Passive liveness check using texture analysis.
+    Returns (is_spoof, spoof_score).
     """
     if crop.size == 0:
         return False, 0.0
-    gray       = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    lap_var    = cv2.Laplacian(gray, cv2.CV_64F).var()
-    # Very low variance → printed flat surface (spoof)
-    # Very high variance → real 3-D face texture
+    gray        = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    lap_var     = cv2.Laplacian(gray, cv2.CV_64F).var()
     spoof_score = max(0.0, 1.0 - min(lap_var / 500.0, 1.0))
     return spoof_score > 0.85, round(spoof_score, 4)
 
 
-# ── Step 5: Employee Matching ───────────────────────────────────────────────────
+# ── Step 5: Employee Matching ──────────────────────────────────
 
 def match_employee(
-    query_emb:    np.ndarray,
-    embeddings:   dict[int, tuple[str, str, np.ndarray]],
+    query_emb:  np.ndarray,
+    embeddings: dict[int, tuple[str, str, np.ndarray]],
 ) -> tuple[Optional[int], Optional[str], Optional[str], float]:
     """
-    Brute-force cosine similarity search (fast for ≤ 1000 employees).
+    Cosine similarity search against enrolled employee embeddings.
     Returns (employee_id, name, code, similarity).
     """
     if not embeddings or query_emb is None:
         return None, None, None, 0.0
 
-    q_norm   = query_emb / (np.linalg.norm(query_emb) + 1e-8)
+    q_norm = query_emb / (np.linalg.norm(query_emb) + 1e-8)
     best_id, best_name, best_code, best_sim = None, None, None, -1.0
 
     for eid, (name, code, db_emb) in embeddings.items():
@@ -239,47 +230,39 @@ def match_employee(
     return best_id, best_name, best_code, round(best_sim, 4)
 
 
-# ── Step 6: Annotate Frame ──────────────────────────────────────────────────────
+# ── Step 6: Annotate Frame ─────────────────────────────────────
 
 def annotate_frame(
     frame:   np.ndarray,
     results: list[RecognitionResult],
 ) -> np.ndarray:
-    """Draw bounding boxes + labels on frame. Returns a copy."""
+    """Draw bounding boxes + labels on frame."""
     out = frame.copy()
     for r in results:
         x1, y1, x2, y2 = r.face.bbox
         if r.is_spoof:
-            color = (0, 165, 255)    # orange — spoof
+            color = (0, 165, 255)
             label = "SPOOF DETECTED"
         elif r.is_match:
-            color = (0, 220, 80)     # green — known employee
+            color = (0, 220, 80)
             label = f"{r.employee_name}  {r.similarity:.2f}"
         else:
-            color = (0, 0, 230)      # red — unknown
+            color = (0, 0, 230)
             label = f"Unknown  {r.similarity:.2f}"
 
-        # Box
         cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
-
-        # Label background
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(out, (x1, y1 - th - 10), (x1 + tw + 6, y1), color, -1)
-
-        # Label text
         cv2.putText(
             out, label, (x1 + 3, y1 - 5),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA,
         )
-
-        # Confidence bar (bottom of box)
-        bar_w = int((x2 - x1) * r.similarity)
+        bar_w = int((x2 - x1) * max(r.similarity, 0))
         cv2.rectangle(out, (x1, y2 + 2), (x1 + bar_w, y2 + 5), color, -1)
-
     return out
 
 
-# ── Main pipeline ───────────────────────────────────────────────────────────────
+# ── Main pipeline ──────────────────────────────────────────────
 
 def process_frame(
     frame:      np.ndarray,
@@ -289,11 +272,15 @@ def process_frame(
 ) -> tuple[list[RecognitionResult], np.ndarray]:
     """
     Full pipeline for one BGR video frame.
+    Returns (results, annotated_frame).
 
-    Returns:
-        results      – list of RecognitionResult (one per quality-passed face)
-        annotated    – BGR frame with bounding boxes drawn
+    Agar model ready nahi hai → empty results, original frame.
+    KOI FAKE DATA NAHI.
     """
+    # Model ready nahi → kuch nahi karo
+    if not is_model_ready():
+        return [], frame.copy()
+
     t0      = time.perf_counter()
     results: list[RecognitionResult] = []
 

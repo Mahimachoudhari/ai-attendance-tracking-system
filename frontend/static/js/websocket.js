@@ -1,54 +1,51 @@
+bash
+
+cat > /home/claude/attendance-system/frontend/static/js/websocket.js << 'EOF'
 /**
  * websocket.js
  * ------------
- * Manages two WebSocket connections:
- *   1. /ws/dashboard  → receives real-time attendance + alert events
- *   2. /ws/camera/1   → receives annotated frames from Entry gate
- *   3. /ws/camera/2   → receives annotated frames from Exit gate
+ * Real WebSocket connections ONLY.
+ * Koi fake/synthetic data dispatch NAHI hoga yahan se.
  *
- * Auto-reconnects on disconnect with exponential backoff.
- * Dispatches CustomEvents on window so other modules can listen
- * without tight coupling.
+ * Connections:
+ *   /ws/dashboard  → real attendance + alert events receive karta hai
+ *   /ws/camera/1   → entry gate annotated frames
+ *   /ws/camera/2   → exit gate annotated frames
  *
- * Events dispatched:
- *   'attendance_event'  → { detail: eventPayload }
- *   'security_alert'    → { detail: alertPayload }
- *   'camera_frame'      → { detail: { cameraId, data, procMs, faceCount } }
+ * Also: /api/health poll karta hai model status check ke liye
  */
 
 'use strict';
 
 const WS = {
 
-  // ── Config ──────────────────────────────────────────────────
   BASE_URL:         window.location.origin.replace(/^http/, 'ws'),
+  API_BASE:         window.location.origin,
   PING_INTERVAL_MS: 25_000,
   MAX_BACKOFF_MS:   16_000,
+  HEALTH_CHECK_MS:  5_000,    // har 5s mein model status check
 
-  // ── Internal state ──────────────────────────────────────────
   _dashWs:    null,
   _cam1Ws:    null,
   _cam2Ws:    null,
   _pingTimer: null,
 
-  // ── Public: init all connections ────────────────────────────
   init() {
     this._connectDashboard(1);
     this._connectCamera(1, 1);
     this._connectCamera(2, 1);
+    this._pollModelStatus();
   },
 
-  // ── Dashboard WebSocket ──────────────────────────────────────
+  // ── Dashboard WebSocket ─────────────────────────────────────
   _connectDashboard(attempt) {
     const url = `${this.BASE_URL}/ws/dashboard`;
-
-    const ws = new WebSocket(url);
+    const ws  = new WebSocket(url);
     this._dashWs = ws;
 
     ws.onopen = () => {
-      console.info('[WS] Dashboard connected');
       attempt = 1;
-      this._setStatus(true);
+      this._setWsStatus(true);
       this._startPing(ws);
     };
 
@@ -56,36 +53,31 @@ const WS = {
       let msg;
       try { msg = JSON.parse(e.data); } catch (_) { return; }
 
+      // Sirf real server-side events forward karo
       if (msg.type === 'attendance_event') {
         window.dispatchEvent(new CustomEvent('attendance_event', { detail: msg }));
       } else if (msg.type === 'security_alert') {
-        window.dispatchEvent(new CustomEvent('security_alert',  { detail: msg }));
+        window.dispatchEvent(new CustomEvent('security_alert', { detail: msg }));
       }
     };
 
     ws.onclose = () => {
-      this._setStatus(false);
+      this._setWsStatus(false);
       clearInterval(this._pingTimer);
       const delay = Math.min(1000 * attempt, this.MAX_BACKOFF_MS);
-      console.warn(`[WS] Dashboard closed — retry in ${delay}ms`);
       setTimeout(() => this._connectDashboard(attempt + 1), delay);
     };
 
     ws.onerror = () => ws.close();
   },
 
-  // ── Camera WebSocket ─────────────────────────────────────────
+  // ── Camera WebSocket ────────────────────────────────────────
   _connectCamera(cameraId, attempt) {
     const url = `${this.BASE_URL}/ws/camera/${cameraId}`;
     const ws  = new WebSocket(url);
 
     if (cameraId === 1) this._cam1Ws = ws;
     else                this._cam2Ws = ws;
-
-    ws.onopen = () => {
-      attempt = 1;
-      console.info(`[WS] Camera ${cameraId} connected`);
-    };
 
     ws.onmessage = (e) => {
       let msg;
@@ -96,9 +88,9 @@ const WS = {
           detail: {
             cameraId,
             data:      msg.data,
-            procMs:    msg.proc_ms   ?? 0,
+            procMs:    msg.proc_ms    ?? 0,
             faceCount: msg.face_count ?? 0,
-            events:    msg.events    ?? [],
+            events:    msg.events     ?? [],
           },
         }));
       }
@@ -106,14 +98,13 @@ const WS = {
 
     ws.onclose = () => {
       const delay = Math.min(1000 * attempt, this.MAX_BACKOFF_MS);
-      console.warn(`[WS] Camera ${cameraId} closed — retry in ${delay}ms`);
       setTimeout(() => this._connectCamera(cameraId, attempt + 1), delay);
     };
 
     ws.onerror = () => ws.close();
   },
 
-  // ── Keep-alive ping ──────────────────────────────────────────
+  // ── Keep-alive ───────────────────────────────────────────────
   _startPing(ws) {
     clearInterval(this._pingTimer);
     this._pingTimer = setInterval(() => {
@@ -121,8 +112,38 @@ const WS = {
     }, this.PING_INTERVAL_MS);
   },
 
-  // ── Update header status indicator ───────────────────────────
-  _setStatus(connected) {
+  // ── Poll /api/health to show AI model status ────────────────
+  async _pollModelStatus() {
+    try {
+      const res  = await fetch(`${this.API_BASE}/api/health`);
+      if (!res.ok) return;
+      const data = await res.json();
+
+      const dot   = document.getElementById('model-dot');
+      const label = document.getElementById('model-label');
+      if (!dot || !label) return;
+
+      // employees_cached > 0 means model loaded + employees enrolled
+      if (data.employees_cached > 0) {
+        dot.className     = 'dot dot-g';
+        label.textContent = `Model Ready · ${data.employees_cached} employees`;
+      } else if (data.db_connected) {
+        dot.className     = 'dot dot-w';
+        label.textContent = 'Model Ready · No employees enrolled';
+      } else {
+        dot.className     = 'dot dot-r';
+        label.textContent = 'DB Not Connected';
+      }
+    } catch (_) {
+      const label = document.getElementById('model-label');
+      if (label) label.textContent = 'Backend Offline';
+    }
+
+    setTimeout(() => this._pollModelStatus(), this.HEALTH_CHECK_MS);
+  },
+
+  // ── WS status indicator ─────────────────────────────────────
+  _setWsStatus(connected) {
     const dot   = document.getElementById('ws-dot');
     const label = document.getElementById('ws-label');
     if (!dot || !label) return;
@@ -135,3 +156,8 @@ const WS = {
     }
   },
 };
+/**EOF
+echo "websocket.js updated"
+Output
+
+websocket.js updated*/

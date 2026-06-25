@@ -6,7 +6,7 @@ Uses psycopg2 with a thread-safe connection pool.
 """
 
 from __future__ import annotations
-
+import ast
 import threading
 from contextlib import contextmanager
 from datetime import date, datetime
@@ -91,86 +91,104 @@ def ping() -> bool:
 
 # ── Employee queries ────────────────────────────────────────────────────────────
 
-def get_all_employees(company_id: int) -> list[dict]:
+def get_today_summary(company_id: int) -> dict:
+
+    today = date.today().isoformat()
+
     with get_conn() as conn:
         cur = conn.cursor()
+
         cur.execute(
             """
-            SELECT id, employee_code, name, department, role,
-                   is_active, enrolled_at, shift_start, shift_end
-            FROM   employees
-            WHERE  company_id = %s
-            ORDER  BY name
+            SELECT
+                COUNT(*) FILTER (WHERE entry_time IS NOT NULL) AS present,
+                COUNT(*) FILTER (WHERE exit_time IS NOT NULL) AS exited,
+                COUNT(*) FILTER (WHERE status = 'late') AS late,
+                COUNT(*) FILTER (WHERE status = 'absent') AS absent,
+
+                ROUND(
+                    AVG(
+                        EXTRACT(
+                            EPOCH FROM (
+                                exit_time - entry_time
+                            )
+                        ) / 3600.0
+                    )
+                    FILTER (
+                        WHERE entry_time IS NOT NULL
+                        AND exit_time IS NOT NULL
+                    )::numeric,
+                    2
+                ) AS avg_hours
+
+            FROM attendance
+            WHERE date = %s
+            AND company_id = %s
             """,
-            (company_id,),
+            (today, company_id)
         )
-        rows = cur.fetchall()
-        cur.close()
-    return [dict(r) for r in rows]
 
-
-def get_employee_embeddings(company_id: int) -> dict[int, tuple[str, str, np.ndarray]]:
-    """
-    Returns {employee_id: (name, employee_code, embedding_array)}
-    for all active employees of a company.
-    Used to populate the in-memory embedding cache.
-    """
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            SELECT id, name, employee_code, face_embedding
-            FROM   employees
-            WHERE  company_id = %s AND is_active = TRUE
-              AND  face_embedding IS NOT NULL
-            """,
-            (company_id,),
-        )
-        rows = cur.fetchall()
-        cur.close()
-
-    result: dict[int, tuple[str, str, np.ndarray]] = {}
-    for r in rows:
-        emb = np.array(r["face_embedding"], dtype=np.float32)
-        result[r["id"]] = (r["name"], r["employee_code"], emb)
-    return result
-
-
-def upsert_employee_embedding(employee_id: int, embedding: list[float]) -> None:
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE employees SET face_embedding = %s::vector WHERE id = %s",
-            (embedding, employee_id),
-        )
-        cur.close()
-
-
-def create_employee(
-    employee_code: str,
-    name: str,
-    company_id: int,
-    department: Optional[str],
-    role: Optional[str],
-) -> int:
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO employees (employee_code, name, company_id, department, role)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (employee_code) DO UPDATE
-                SET name = EXCLUDED.name,
-                    department = EXCLUDED.department,
-                    role = EXCLUDED.role
-            RETURNING id
-            """,
-            (employee_code, name, company_id, department, role),
-        )
         row = cur.fetchone()
         cur.close()
-    return row["id"]
 
+    return dict(row) if row else {}
+
+
+
+def get_employee_embeddings(company_id: int):
+
+    with get_conn() as conn:
+
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT
+                id,
+                name,
+                employee_code,
+                face_embedding
+            FROM employees
+            WHERE company_id = %s
+            AND is_active = TRUE
+            AND face_embedding IS NOT NULL
+            """,
+            (company_id,)
+        )
+
+        rows = cur.fetchall()
+        cur.close()
+
+    result = {}
+
+    for r in rows:
+
+        try:
+
+            emb = r["face_embedding"]
+
+            if isinstance(emb, str):
+                emb = ast.literal_eval(emb)
+
+            emb = np.array(
+                emb,
+                dtype=np.float32
+            )
+
+            result[r["id"]] = (
+                r["name"],
+                r["employee_code"],
+                emb
+            )
+
+        except Exception as e:
+
+            logger.error(
+                f"Embedding parse failed for "
+                f"{r['id']} : {e}"
+            )
+
+    return result
 
 # ── Attendance queries ──────────────────────────────────────────────────────────
 
@@ -290,27 +308,57 @@ def get_today_summary(company_id: int) -> dict:
 
 
 def get_today_records(company_id: int, limit: int = 200) -> list[dict]:
+
     today = date.today().isoformat()
+
     with get_conn() as conn:
         cur = conn.cursor()
+
         cur.execute(
             """
             SELECT
-                a.id, a.employee_id, a.employee_name,
-                e.employee_code, e.department,
-                a.date, a.entry_time, a.exit_time,
-                TO_CHAR(a.work_duration, 'HH24:MI:SS') AS work_duration,
-                a.entry_confidence, a.exit_confidence, a.status
-            FROM  attendance a
-            JOIN  employees  e ON e.id = a.employee_id
-            WHERE a.date = %s AND a.company_id = %s
+                a.id,
+                a.employee_id,
+                a.employee_name,
+                e.employee_code,
+                e.department,
+                a.date,
+                a.entry_time,
+                a.exit_time,
+
+                CASE
+                    WHEN a.entry_time IS NOT NULL
+                     AND a.exit_time IS NOT NULL
+                    THEN
+                        TO_CHAR(
+                            a.exit_time - a.entry_time,
+                            'HH24:MI:SS'
+                        )
+                    ELSE NULL
+                END AS work_duration,
+
+                a.status
+
+            FROM attendance a
+            JOIN employees e
+                ON e.id = a.employee_id
+
+            WHERE a.date = %s
+            AND a.company_id = %s
+
             ORDER BY a.entry_time DESC NULLS LAST
             LIMIT %s
             """,
-            (today, company_id, limit),
+            (
+                today,
+                company_id,
+                limit
+            )
         )
+
         rows = cur.fetchall()
         cur.close()
+
     return [dict(r) for r in rows]
 
 
