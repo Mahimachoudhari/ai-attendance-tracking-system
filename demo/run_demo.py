@@ -184,3 +184,4 @@ if __name__ == "__main__":
         asyncio.run(main(args.entry, args.exit))
     except KeyboardInterrupt:
         print("\nDemo stopped.")
+        print("ai Tracking system demo stopped.")
