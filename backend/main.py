@@ -30,7 +30,10 @@ async def lifespan(app: FastAPI):
     logger.info("=" * 60)
     try:
         db.init_pool()
-        logger.info("DB pool ready")
+        if db.ping():
+            logger.info("DB pool ready")
+        else:
+            logger.warning("DB pool initialized but ping failed; database features will be unavailable")
     except Exception as e:
         logger.warning(f"DB pool failed: {e}")
     logger.info("Loading AI model at startup...")
@@ -40,7 +43,7 @@ async def lifespan(app: FastAPI):
         if is_model_ready():
             logger.info("InsightFace model ready")
         else:
-            logger.error("InsightFace model failed!")
+            logger.warning("InsightFace model not ready; AI recognition will be unavailable")
     except Exception as e:
         logger.error(f"Model load error: {e}")
     n = embedding_store.load()
@@ -75,13 +78,16 @@ async def serve_dashboard():
 
 @app.get("/api/health", tags=["System"])
 async def health():
-    from backend.services.cache import ping_redis
     from backend.core.ai_pipeline import is_model_ready
+    try:
+        db_connected = db.ping()
+    except Exception:
+        db_connected = False
     return {
         "status": "ok",
         "model_ready": is_model_ready(),
         "employees_cached": embedding_store.count(),
-        "db_connected": db.ping(),
+        "db_connected": db_connected,
         "uptime_seconds": round(time.monotonic() - _start_time, 1),
     }
 

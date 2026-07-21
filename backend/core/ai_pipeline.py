@@ -18,9 +18,11 @@ Steps:
 
 from __future__ import annotations
 
+import os
 import time
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import cv2
@@ -35,6 +37,11 @@ _app         = None          # InsightFace FaceAnalysis app
 _model_ready = False         # True only when real model loaded
 
 
+def _model_cache_path() -> Path:
+    home = Path(os.path.expanduser("~"))
+    return home / ".insightface" / "models" / cfg.model_name
+
+
 def _load_model():
     global _app, _model_ready
     if _app is not None:
@@ -43,26 +50,34 @@ def _load_model():
         if _app is not None:
             return _app
         try:
+            model_dir = _model_cache_path()
+            if not model_dir.exists():
+                _app = None
+                _model_ready = False
+                logger.warning(
+                    f"InsightFace model '{cfg.model_name}' is not present locally at {model_dir}; "
+                    "AI features will stay disabled until the model is available."
+                )
+                return None
+
             from insightface.app import FaceAnalysis
             providers = (
                 ["CUDAExecutionProvider", "CPUExecutionProvider"]
                 if cfg.gpu_id >= 0
                 else ["CPUExecutionProvider"]
             )
-            app = FaceAnalysis(name='buffalo_l', providers=providers)
+            app = FaceAnalysis(name=cfg.model_name, providers=providers)
             app.prepare(ctx_id=cfg.gpu_id, det_size=(640, 640))
-            _app         = app
+            _app = app
             _model_ready = True
             logger.info(f"✅ InsightFace loaded: {cfg.model_name} (GPU={cfg.gpu_id})")
         except Exception as e:
-            # Model load nahi hua — _app = None rakhenge
-            # Koi mock/fake data NAHI banayenge
-            _app         = None
+            _app = None
             _model_ready = False
             logger.error(
                 f"❌ InsightFace load failed: {e}\n"
                 f"   Real attendance kaam nahi karega jab tak model load na ho.\n"
-                f"   Fix: pip install insightface onnxruntime"
+                f"   Fix: ensure the model is available locally or install insightface + onnxruntime."
             )
     return _app
 

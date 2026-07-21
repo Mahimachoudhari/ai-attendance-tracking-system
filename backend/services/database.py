@@ -48,8 +48,8 @@ def init_pool() -> None:
                 f"→ {cfg.db_host}:{cfg.db_port}/{cfg.db_name}"
             )
         except Exception as e:
+            _pool = None
             logger.error(f"DB pool init failed: {e}")
-            raise
 
 
 def close_pool() -> None:
@@ -65,6 +65,9 @@ def get_conn() -> Generator:
     """Context manager: borrow a connection from pool, return on exit."""
     if _pool is None:
         init_pool()
+    if _pool is None:
+        raise RuntimeError("Database unavailable: connection pool could not be initialized")
+
     conn = _pool.getconn()
     try:
         yield conn
